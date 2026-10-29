@@ -1,12 +1,18 @@
 """GreyNoise API client test cases."""
 
+import gzip
+import http.server
+import io
+import json
+import threading
 from unittest.mock import Mock, call, patch
 
 import cachetools
 import pytest
+import requests
 
-from greynoise.api import APIConfig, GreyNoise
-from greynoise.exceptions import RequestFailure
+from greynoise.api import APIConfig, FileResult, GreyNoise
+from greynoise.exceptions import RateLimitError, RequestFailure
 
 
 @pytest.fixture
@@ -1116,3 +1122,260 @@ class TestCacheBehavior:
         second_result = client.ip("8.8.8.8")
         assert second_result == mock_response
         assert client._request.call_count == 2
+
+
+def _file_response(status_code, body=b"", headers=None):
+    response = requests.Response()
+    response.status_code = status_code
+    response.headers.update(headers or {})
+    response.raw = io.BytesIO(body)
+    return response
+
+
+class _BrokenStream(io.BytesIO):
+    def read(self, *args, **kwargs):
+        raise requests.exceptions.ChunkedEncodingError("connection reset")
+
+
+FILE_ENDPOINTS = [
+    pytest.param(
+        lambda c, output, **kw: c.callback_file(output, **kw),
+        "https://api.greynoise.io/v3/files/callback",
+        {"days": 7, "format": "csv", "profile": "ngsiem"},
+        id="callback",
+    ),
+    pytest.param(
+        lambda c, output, **kw: c.gnql_file("last_seen:1d", output, **kw),
+        "https://api.greynoise.io/v3/files/gnql",
+        {"query": "last_seen:1d", "format": "csv", "profile": "ngsiem"},
+        id="gnql",
+    ),
+]
+
+
+@pytest.mark.parametrize("download, url, params", FILE_ENDPOINTS)
+class TestFiles:
+    """Pre-built file downloads (``/v3/files``)."""
+
+    def test_ok_writes_path(self, client, tmp_path, download, url, params):
+        body = b"source.ip\r\n198.51.100.42\r\n"
+        headers = {
+            "ETag": '"abc"',
+            "X-GreyNoise-Generated-At": "2026-10-29T10:00:00Z",
+            "X-GreyNoise-Row-Count": "1",
+            "X-GreyNoise-Total-Count": "5",
+            "X-GreyNoise-Truncated": "true",
+        }
+        client._file_session.get = Mock(return_value=_file_response(200, body, headers))
+        output = tmp_path / "feed.csv"
+
+        result = download(client, str(output), etag='"old"', integration="crowdstrike-ngsiem/3.1.0")
+
+        assert result == FileResult(
+            status="ok",
+            etag='"abc"',
+            generated_at="2026-10-29T10:00:00Z",
+            row_count=1,
+            total_count=5,
+            truncated=True,
+        )
+        assert output.read_bytes() == body
+        assert [p.name for p in tmp_path.iterdir()] == ["feed.csv"]
+        args, kwargs = client._file_session.get.call_args
+        assert args == (url,)
+        assert kwargs["params"] == params
+        assert kwargs["stream"] is True
+        assert kwargs["headers"]["key"] == "<api_key>"
+        assert kwargs["headers"]["If-None-Match"] == '"old"'
+        assert kwargs["headers"]["X-GreyNoise-Integration"] == "crowdstrike-ngsiem/3.1.0"
+
+    def test_ok_writes_file_object(self, client, download, url, params):
+        client._file_session.get = Mock(return_value=_file_response(200, b"source.ip\r\n", {"ETag": '"abc"'}))
+        output = io.BytesIO()
+
+        result = download(client, output)
+
+        assert result == FileResult(status="ok", etag='"abc"')
+        assert output.getvalue() == b"source.ip\r\n"
+        headers = client._file_session.get.call_args[1]["headers"]
+        assert "If-None-Match" not in headers
+        assert "X-GreyNoise-Integration" not in headers
+
+    def test_not_modified(self, client, tmp_path, download, url, params):
+        headers = {"ETag": '"abc"', "X-GreyNoise-Generated-At": "2026-10-29T10:00:00Z"}
+        client._file_session.get = Mock(return_value=_file_response(304, headers=headers))
+        output = tmp_path / "feed.csv"
+
+        result = download(client, str(output), etag='"abc"')
+
+        assert result == FileResult(status="not_modified", etag='"abc"', generated_at="2026-10-29T10:00:00Z")
+        assert not output.exists()
+
+    def test_not_modified_without_etag_header_keeps_sent_etag(self, client, tmp_path, download, url, params):
+        client._file_session.get = Mock(return_value=_file_response(304))
+
+        result = download(client, str(tmp_path / "feed.csv"), etag='"abc"')
+
+        assert result.etag == '"abc"'
+
+    def test_provisioning(self, client, tmp_path, download, url, params):
+        body = json.dumps({"status": "provisioning"}).encode()
+        headers = {"Retry-After": "60", "Content-Type": "application/json"}
+        client._file_session.get = Mock(return_value=_file_response(202, body, headers))
+        output = tmp_path / "feed.csv"
+
+        result = download(client, str(output))
+
+        assert result == FileResult(status="provisioning", retry_after=60)
+        assert not output.exists()
+
+    @pytest.mark.parametrize(
+        "status_code, error",
+        [
+            (400, {"error": "query is required"}),
+            (401, {"message": "invalid key"}),
+            (403, {"error": "feature not allowed"}),
+            (500, {"error": "failed to retrieve feed"}),
+            (503, {"error": "retry later"}),
+        ],
+    )
+    def test_error(self, client, tmp_path, download, url, params, status_code, error):
+        response = _file_response(status_code, json.dumps(error).encode(), {"Content-Type": "application/json"})
+        client._file_session.get = Mock(return_value=response)
+        output = tmp_path / "feed.csv"
+
+        with pytest.raises(RequestFailure) as exc:
+            download(client, str(output))
+
+        assert exc.value.args == (status_code, error)
+        assert not output.exists()
+
+    def test_rate_limited(self, client, tmp_path, download, url, params):
+        body = json.dumps({"error": "fetched too often"}).encode()
+        client._file_session.get = Mock(return_value=_file_response(429, body, {"Content-Type": "application/json"}))
+
+        with pytest.raises(RateLimitError) as exc:
+            download(client, str(tmp_path / "feed.csv"))
+
+        assert exc.value.args == (429, {"error": "fetched too often"})
+
+    def test_connection_error(self, client, tmp_path, download, url, params):
+        client._file_session.get = Mock(side_effect=requests.exceptions.ConnectionError("refused"))
+
+        with pytest.raises(RequestFailure) as exc:
+            download(client, str(tmp_path / "feed.csv"))
+
+        assert exc.value.args == (0, "refused")
+
+    def test_interrupted_stream_keeps_previous_file(self, client, tmp_path, download, url, params):
+        response = _file_response(200)
+        response.raw = _BrokenStream()
+        client._file_session.get = Mock(return_value=response)
+        output = tmp_path / "feed.csv"
+        output.write_bytes(b"previous")
+
+        with pytest.raises(RequestFailure):
+            download(client, str(output))
+
+        assert output.read_bytes() == b"previous"
+        assert [p.name for p in tmp_path.iterdir()] == ["feed.csv"]
+
+
+class TestFileParams:
+    """File download request parameters."""
+
+    def test_limit(self, client):
+        client._file_session.get = Mock(return_value=_file_response(304))
+
+        client.gnql_file("last_seen:1d", io.BytesIO(), limit=500)
+
+        assert client._file_session.get.call_args[1]["params"]["limit"] == 500
+
+    def test_proxy(self, client):
+        client.config.proxy = "http://proxy:3128"
+        client._file_session.get = Mock(return_value=_file_response(304))
+
+        client.callback_file(io.BytesIO(), days=3)
+
+        kwargs = client._file_session.get.call_args[1]
+        assert kwargs["proxies"] == {"http": "http://proxy:3128", "https": "http://proxy:3128"}
+        assert kwargs["params"]["days"] == 3
+
+    def test_timeout(self, client):
+        client._file_session.get = Mock(return_value=_file_response(304))
+
+        client.gnql_file("last_seen:1d", io.BytesIO())
+        assert client._file_session.get.call_args[1]["timeout"] == 120
+
+        client.gnql_file("last_seen:1d", io.BytesIO(), timeout=(10, 300))
+        assert client._file_session.get.call_args[1]["timeout"] == (10, 300)
+
+
+class _FileServer(http.server.BaseHTTPRequestHandler):
+    hits = []
+
+    def do_GET(self):
+        _FileServer.hits.append(self.path)
+        if self.path.startswith("/v3/files/gnql"):
+            body = gzip.compress(b"source.ip\r\n198.51.100.42\r\n")
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("ETag", '"abc"')
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/v3/files/callback") and "days=1" in self.path:
+            self.send_response(200)
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            self.wfile.write(b"source.ip\r\n")
+        else:
+            body = json.dumps({"error": "retry later"}).encode()
+            self.send_response(503)
+            self.send_header("Retry-After", "60")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def file_server_client():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FileServer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    _FileServer.hits = []
+    client = GreyNoise(APIConfig(api_key="<api_key>", api_server="http://127.0.0.1:{}".format(server.server_port)))
+    yield client
+    client.close()
+    server.shutdown()
+    server.server_close()
+
+
+class TestFilesOverHTTP:
+    """File downloads against a local HTTP server, through the real session."""
+
+    def test_gzip_is_decoded(self, file_server_client, tmp_path):
+        output = tmp_path / "feed.csv"
+
+        result = file_server_client.gnql_file("last_seen:1d", str(output))
+
+        assert result.status == "ok"
+        assert output.read_bytes() == b"source.ip\r\n198.51.100.42\r\n"
+
+    def test_short_body_fails_without_writing(self, file_server_client, tmp_path):
+        output = tmp_path / "feed.csv"
+
+        with pytest.raises(RequestFailure):
+            file_server_client.callback_file(str(output), days=1)
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_unavailable_is_not_retried(self, file_server_client, tmp_path):
+        with pytest.raises(RequestFailure) as exc:
+            file_server_client.callback_file(str(tmp_path / "feed.csv"))
+
+        assert exc.value.args == (503, {"error": "retry later"})
+        assert len(_FileServer.hits) == 1
