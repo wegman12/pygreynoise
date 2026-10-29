@@ -67,7 +67,8 @@ class FileResult:
     ``status`` is ``ok`` when the file was written, ``not_modified`` when the
     ``etag`` passed in is still current, and ``provisioning`` when the server is
     still building the file and the caller should retry after ``retry_after``
-    seconds. Nothing is written unless ``status`` is ``ok``.
+    seconds. Nothing is written unless ``status`` is ``ok``. ``feed_status`` is
+    the GNQL subscription's build status.
     """
 
     STATUS_OK = "ok"
@@ -80,6 +81,7 @@ class FileResult:
     row_count: Optional[int] = None
     total_count: Optional[int] = None
     truncated: bool = False
+    feed_status: Optional[str] = None
     retry_after: Optional[int] = None
 
 
@@ -344,6 +346,7 @@ class GreyNoise(BaseAPIClient):
     EP_CALLBACK_OVERVIEW = "v1/callback/overview"
     EP_FILES_CALLBACK = "v3/files/callback"
     EP_FILES_GNQL = "v3/files/gnql"
+    EP_FILES_GNQL_METADATA = "v3/files/gnql/metadata"
     EP_NOT_IMPLEMENTED = "v2/request/{subcommand}"
     UNKNOWN_CODE_MESSAGE = "Code message unknown: {}"
 
@@ -1725,7 +1728,7 @@ class GreyNoise(BaseAPIClient):
         :raises RequestFailure: On any other error response or connection failure.
         """
         params = {"days": days, "format": file_format, "profile": profile}
-        return self._download_file(self.EP_FILES_CALLBACK, params, output, etag, integration, timeout)
+        return self._files_request(self.EP_FILES_CALLBACK, params, output, etag, integration, timeout)
 
     def gnql_file(
         self,
@@ -1759,12 +1762,34 @@ class GreyNoise(BaseAPIClient):
         :raises RateLimitError: On HTTP 429.
         :raises RequestFailure: On any other error response or connection failure.
         """
-        params = {"query": query, "format": file_format, "profile": profile}
-        if limit is not None:
-            params["limit"] = limit
-        return self._download_file(self.EP_FILES_GNQL, params, output, etag, integration, timeout)
+        params = _gnql_file_params(query, limit, file_format, profile)
+        return self._files_request(self.EP_FILES_GNQL, params, output, etag, integration, timeout)
 
-    def _download_file(self, endpoint, params, output, etag, integration, timeout) -> FileResult:
+    def gnql_file_metadata(
+        self,
+        query: str,
+        *,
+        limit: Optional[int] = None,
+        file_format: str = "csv",
+        profile: str = "ngsiem",
+        integration: Optional[str] = None,
+        timeout: Union[float, Tuple[float, float], None] = None,
+    ) -> FileResult:
+        """Describe the file :meth:`gnql_file` would serve, without downloading it
+        (``GET /v3/files/gnql/metadata``).
+
+        Takes the same parameters as :meth:`gnql_file` and returns the same fields,
+        with ``status`` ``ok`` or ``provisioning``. Like a download, the first
+        request for a query subscribes to it, and requests count toward the
+        query's fetch rate limit.
+
+        :raises RateLimitError: On HTTP 429.
+        :raises RequestFailure: On any other error response or connection failure.
+        """
+        params = _gnql_file_params(query, limit, file_format, profile)
+        return self._files_request(self.EP_FILES_GNQL_METADATA, params, None, None, integration, timeout)
+
+    def _files_request(self, endpoint, params, output, etag, integration, timeout) -> FileResult:
         headers = self._default_headers()
         if etag:
             headers["If-None-Match"] = etag
@@ -1772,7 +1797,7 @@ class GreyNoise(BaseAPIClient):
             headers["X-GreyNoise-Integration"] = integration
         proxies = {protocol: self.config.proxy for protocol in ("http", "https")} if self.config.proxy else None
 
-        LOGGER.debug("Downloading file from %s with params %s", endpoint, params)
+        LOGGER.debug("Requesting file from %s with params %s", endpoint, params)
         try:
             with self._file_session.get(
                 _api_request_url(self.config.api_server, endpoint),
@@ -1783,11 +1808,11 @@ class GreyNoise(BaseAPIClient):
                 stream=True,
             ) as response:
                 result = _file_result(response, etag)
-                if result.status == FileResult.STATUS_OK:
+                if result.status == FileResult.STATUS_OK and output is not None:
                     _write_stream(response.iter_content(self.FILE_CHUNK_SIZE), output)
                 return result
         except requests.exceptions.RequestException as e:
-            LOGGER.error("File download failed: %s", str(e))
+            LOGGER.error("File request failed: %s", str(e))
             raise RequestFailure(0, str(e))
 
 
@@ -1821,7 +1846,15 @@ def _file_result(response: requests.Response, etag: Optional[str]) -> FileResult
         total_count=_header_int(headers.get("X-GreyNoise-Total-Count")),
         truncated=headers.get("X-GreyNoise-Truncated", "").lower() == "true",
         retry_after=_header_int(headers.get("Retry-After")),
+        feed_status=headers.get("X-GreyNoise-Feed-Status"),
     )
+
+
+def _gnql_file_params(query, limit, file_format, profile) -> Dict[str, Any]:
+    params = {"query": query, "format": file_format, "profile": profile}
+    if limit is not None:
+        params["limit"] = limit
+    return params
 
 
 def _header_int(value: Optional[str]) -> Optional[int]:

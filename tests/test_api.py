@@ -1281,6 +1281,71 @@ class TestFiles:
         assert [p.name for p in tmp_path.iterdir()] == ["feed.csv"]
 
 
+class TestGNQLFileMetadata:
+    """GNQL file metadata (``/v3/files/gnql/metadata``)."""
+
+    def test_ok(self, client):
+        body = {
+            "status": "enabled",
+            "query": "last_seen:1d",
+            "generated_at": "2026-10-29T10:00:00Z",
+            "etag": '"abc"',
+            "row_count": 500,
+            "total_count": 900,
+            "truncated": True,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "ETag": '"abc"',
+            "X-GreyNoise-Generated-At": "2026-10-29T10:00:00Z",
+            "X-GreyNoise-Row-Count": "500",
+            "X-GreyNoise-Total-Count": "900",
+            "X-GreyNoise-Truncated": "true",
+            "X-GreyNoise-Feed-Status": "enabled",
+        }
+        client._file_session.get = Mock(return_value=_file_response(200, json.dumps(body).encode(), headers))
+
+        result = client.gnql_file_metadata("last_seen:1d", limit=500, integration="crowdstrike-ngsiem/3.1.0")
+
+        assert result == FileResult(
+            status="ok",
+            etag='"abc"',
+            generated_at="2026-10-29T10:00:00Z",
+            row_count=500,
+            total_count=900,
+            truncated=True,
+            feed_status="enabled",
+        )
+        args, kwargs = client._file_session.get.call_args
+        assert args == ("https://api.greynoise.io/v3/files/gnql/metadata",)
+        assert kwargs["params"] == {"query": "last_seen:1d", "format": "csv", "profile": "ngsiem", "limit": 500}
+        assert kwargs["headers"]["X-GreyNoise-Integration"] == "crowdstrike-ngsiem/3.1.0"
+        assert "If-None-Match" not in kwargs["headers"]
+
+    def test_provisioning(self, client):
+        headers = {"Content-Type": "application/json", "Retry-After": "60", "X-GreyNoise-Feed-Status": "provisioning"}
+        response = _file_response(202, json.dumps({"status": "provisioning"}).encode(), headers)
+        client._file_session.get = Mock(return_value=response)
+
+        result = client.gnql_file_metadata("last_seen:1d")
+
+        assert result == FileResult(status="provisioning", retry_after=60, feed_status="provisioning")
+
+    @pytest.mark.parametrize(
+        "status_code, exception",
+        [(400, RequestFailure), (403, RequestFailure), (429, RateLimitError), (503, RequestFailure)],
+    )
+    def test_error(self, client, status_code, exception):
+        error = {"error": "nope"}
+        response = _file_response(status_code, json.dumps(error).encode(), {"Content-Type": "application/json"})
+        client._file_session.get = Mock(return_value=response)
+
+        with pytest.raises(exception) as exc:
+            client.gnql_file_metadata("last_seen:1d")
+
+        assert exc.value.args == (status_code, error)
+
+
 class TestFileParams:
     """File download request parameters."""
 
