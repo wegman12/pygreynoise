@@ -68,7 +68,9 @@ class FileResult:
     ``etag`` passed in is still current, and ``provisioning`` when the server is
     still building the file and the caller should retry after ``retry_after``
     seconds. Nothing is written unless ``status`` is ``ok``. ``feed_status`` is
-    the GNQL subscription's build status.
+    the GNQL subscription's build status. A field the server did not report is
+    ``None``: callback files report no ``truncated``, and a GNQL ``not_modified``
+    response reports neither ``row_count`` nor ``truncated``.
     """
 
     STATUS_OK = "ok"
@@ -80,7 +82,7 @@ class FileResult:
     generated_at: Optional[str] = None
     row_count: Optional[int] = None
     total_count: Optional[int] = None
-    truncated: bool = False
+    truncated: Optional[bool] = None
     feed_status: Optional[str] = None
     retry_after: Optional[int] = None
 
@@ -1866,7 +1868,7 @@ def _file_result(response: requests.Response, etag: Optional[str]) -> FileResult
         generated_at=headers.get("X-GreyNoise-Generated-At"),
         row_count=_header_int(headers.get("X-GreyNoise-Row-Count")),
         total_count=_header_int(headers.get("X-GreyNoise-Total-Count")),
-        truncated=headers.get("X-GreyNoise-Truncated", "").lower() == "true",
+        truncated=_header_bool(headers.get("X-GreyNoise-Truncated")),
         retry_after=_header_int(headers.get("Retry-After")),
         feed_status=headers.get("X-GreyNoise-Feed-Status"),
     )
@@ -1877,6 +1879,12 @@ def _gnql_file_params(query, limit, file_format, profile) -> Dict[str, Any]:
     if limit is not None:
         params["limit"] = limit
     return params
+
+
+def _header_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    return value.strip().lower() == "true"
 
 
 def _header_int(value: Optional[str]) -> Optional[int]:

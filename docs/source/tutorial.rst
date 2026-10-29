@@ -751,7 +751,7 @@ stream the file to a path or binary file object and return a ``FileResult``. Pas
 
     >>> result = api_client.gnql_file('last_seen:1d -classification:unknown', 'feed.csv', limit=100000)
     >>> result
-    FileResult(status='ok', etag='"5d1c..."', generated_at='2026-10-29T10:00:00Z', row_count=100000, total_count=250000, truncated=True, retry_after=None, feed_status='enabled')
+    FileResult(status='ok', etag='"5d1c..."', generated_at='2026-10-29T10:00:00Z', row_count=100000, total_count=250000, truncated=True, feed_status='enabled', retry_after=None)
     >>> api_client.gnql_file('last_seen:1d -classification:unknown', 'feed.csv', limit=100000, etag=result.etag).status
     'not_modified'
 

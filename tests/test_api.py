@@ -1211,6 +1211,15 @@ class TestFiles:
         assert result == FileResult(status="not_modified", etag='"abc"', generated_at="2026-10-29T10:00:00Z")
         assert not output.exists()
 
+    @pytest.mark.parametrize("header, expected", [(None, None), ("false", False), ("true", True)])
+    def test_truncated_reported_only_when_sent(self, client, download, url, params, header, expected):
+        headers = {} if header is None else {"X-GreyNoise-Truncated": header}
+        client._file_session.get = Mock(return_value=_file_response(304, headers=headers))
+
+        result = download(client, io.BytesIO(), etag='"abc"')
+
+        assert result.truncated is expected
+
     def test_not_modified_without_etag_header_keeps_sent_etag(self, client, tmp_path, download, url, params):
         client._file_session.get = Mock(return_value=_file_response(304))
 
