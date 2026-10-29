@@ -757,9 +757,9 @@ stream the file to a path or binary file object and return a ``FileResult``. Pas
 
 The first request for a new query subscribes to it and returns status ``provisioning`` until
 the file is built; retry after ``result.retry_after`` seconds. Integrations should identify
-themselves with ``integration='name/version'``. ``gnql_file_metadata`` takes the same arguments as
-``gnql_file`` (without ``output`` and ``etag``) and returns the same fields without downloading
-the file. Error responses raise ``RequestFailure``
+themselves with ``integration='name/version'``. ``callback_file_metadata`` and ``gnql_file_metadata``
+take the same arguments as the download functions (without ``output`` and ``etag``) and return
+the same fields without downloading the file. Error responses raise ``RequestFailure``
 (``RateLimitError`` for HTTP 429) with the status code and error body as arguments.
 
 

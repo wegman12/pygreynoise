@@ -345,6 +345,7 @@ class GreyNoise(BaseAPIClient):
     EP_CALLBACK_EXPORT_IPS = "v1/callback/export-ips"
     EP_CALLBACK_OVERVIEW = "v1/callback/overview"
     EP_FILES_CALLBACK = "v3/files/callback"
+    EP_FILES_CALLBACK_METADATA = "v3/files/callback/metadata"
     EP_FILES_GNQL = "v3/files/gnql"
     EP_FILES_GNQL_METADATA = "v3/files/gnql/metadata"
     EP_NOT_IMPLEMENTED = "v2/request/{subcommand}"
@@ -1729,6 +1730,27 @@ class GreyNoise(BaseAPIClient):
         """
         params = {"days": days, "format": file_format, "profile": profile}
         return self._files_request(self.EP_FILES_CALLBACK, params, output, etag, integration, timeout)
+
+    def callback_file_metadata(
+        self,
+        *,
+        days: int = 7,
+        file_format: str = "csv",
+        profile: str = "ngsiem",
+        integration: Optional[str] = None,
+        timeout: Union[float, Tuple[float, float], None] = None,
+    ) -> FileResult:
+        """Describe the file :meth:`callback_file` would serve, without downloading it
+        (``GET /v3/files/callback/metadata``).
+
+        Takes the same parameters as :meth:`callback_file` and returns ``status``
+        ``ok`` or ``provisioning``, with ``etag``, ``generated_at`` and ``row_count``.
+
+        :raises RateLimitError: On HTTP 429.
+        :raises RequestFailure: On any other error response or connection failure.
+        """
+        params = {"days": days, "format": file_format, "profile": profile}
+        return self._files_request(self.EP_FILES_CALLBACK_METADATA, params, None, None, integration, timeout)
 
     def gnql_file(
         self,

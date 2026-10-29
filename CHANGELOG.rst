@@ -9,7 +9,7 @@ Version `dev`_
 * API client:
 
   * Added `callback_file` and `gnql_file` functions to download the pre-built callback and GNQL SIEM files (``/v3/files/callback``, ``/v3/files/gnql``), with ETag support, returning a `FileResult`
-  * Added `gnql_file_metadata` function to describe the GNQL SIEM file without downloading it (``/v3/files/gnql/metadata``)
+  * Added `callback_file_metadata` and `gnql_file_metadata` functions to describe the pre-built files without downloading them (``/v3/files/callback/metadata``, ``/v3/files/gnql/metadata``)
 
 Version `3.1.0`_
 ================

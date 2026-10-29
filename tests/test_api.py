@@ -1281,6 +1281,60 @@ class TestFiles:
         assert [p.name for p in tmp_path.iterdir()] == ["feed.csv"]
 
 
+class TestCallbackFileMetadata:
+    """Callback file metadata (``/v3/files/callback/metadata``)."""
+
+    def test_ok(self, client):
+        body = {
+            "format": "csv",
+            "profile": "ngsiem",
+            "days": 3,
+            "generated_at": "2026-10-29T10:00:00Z",
+            "size_bytes": 1024,
+            "row_count": 12,
+            "etag": '"abc"',
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "ETag": '"abc"',
+            "X-GreyNoise-Generated-At": "2026-10-29T10:00:00Z",
+            "X-GreyNoise-Row-Count": "12",
+        }
+        client._file_session.get = Mock(return_value=_file_response(200, json.dumps(body).encode(), headers))
+
+        result = client.callback_file_metadata(days=3, integration="crowdstrike-ngsiem/3.1.0")
+
+        assert result == FileResult(status="ok", etag='"abc"', generated_at="2026-10-29T10:00:00Z", row_count=12)
+        args, kwargs = client._file_session.get.call_args
+        assert args == ("https://api.greynoise.io/v3/files/callback/metadata",)
+        assert kwargs["params"] == {"days": 3, "format": "csv", "profile": "ngsiem"}
+        assert kwargs["headers"]["X-GreyNoise-Integration"] == "crowdstrike-ngsiem/3.1.0"
+        assert "If-None-Match" not in kwargs["headers"]
+
+    def test_building(self, client):
+        headers = {"Content-Type": "application/json", "Retry-After": "30"}
+        response = _file_response(202, json.dumps({"status": "building"}).encode(), headers)
+        client._file_session.get = Mock(return_value=response)
+
+        result = client.callback_file_metadata()
+
+        assert result == FileResult(status="provisioning", retry_after=30)
+
+    @pytest.mark.parametrize(
+        "status_code, exception",
+        [(400, RequestFailure), (403, RequestFailure), (429, RateLimitError), (503, RequestFailure)],
+    )
+    def test_error(self, client, status_code, exception):
+        error = {"error": "nope"}
+        response = _file_response(status_code, json.dumps(error).encode(), {"Content-Type": "application/json"})
+        client._file_session.get = Mock(return_value=response)
+
+        with pytest.raises(exception) as exc:
+            client.callback_file_metadata()
+
+        assert exc.value.args == (status_code, error)
+
+
 class TestGNQLFileMetadata:
     """GNQL file metadata (``/v3/files/gnql/metadata``)."""
 
