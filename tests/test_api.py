@@ -1160,7 +1160,6 @@ class TestFiles:
     def test_ok_writes_path(self, client, tmp_path, download, url, params):
         body = b"source.ip\r\n198.51.100.42\r\n"
         headers = {
-            "ETag": '"abc"',
             "X-GreyNoise-Generated-At": "2026-10-29T10:00:00Z",
             "X-GreyNoise-Row-Count": "1",
             "X-GreyNoise-Total-Count": "5",
@@ -1169,11 +1168,10 @@ class TestFiles:
         client._file_session.get = Mock(return_value=_file_response(200, body, headers))
         output = tmp_path / "feed.csv"
 
-        result = download(client, str(output), etag='"old"', integration="crowdstrike-ngsiem/3.1.0")
+        result = download(client, str(output), integration="crowdstrike-ngsiem/3.1.0")
 
         assert result == FileResult(
             status="ok",
-            etag='"abc"',
             generated_at="2026-10-29T10:00:00Z",
             row_count=1,
             total_count=5,
@@ -1186,46 +1184,26 @@ class TestFiles:
         assert kwargs["params"] == params
         assert kwargs["stream"] is True
         assert kwargs["headers"]["key"] == "<api_key>"
-        assert kwargs["headers"]["If-None-Match"] == '"old"'
         assert kwargs["headers"]["X-GreyNoise-Integration"] == "crowdstrike-ngsiem/3.1.0"
 
     def test_ok_writes_file_object(self, client, download, url, params):
-        client._file_session.get = Mock(return_value=_file_response(200, b"source.ip\r\n", {"ETag": '"abc"'}))
+        client._file_session.get = Mock(return_value=_file_response(200, b"source.ip\r\n"))
         output = io.BytesIO()
 
         result = download(client, output)
 
-        assert result == FileResult(status="ok", etag='"abc"')
+        assert result == FileResult(status="ok")
         assert output.getvalue() == b"source.ip\r\n"
-        headers = client._file_session.get.call_args[1]["headers"]
-        assert "If-None-Match" not in headers
-        assert "X-GreyNoise-Integration" not in headers
-
-    def test_not_modified(self, client, tmp_path, download, url, params):
-        headers = {"ETag": '"abc"', "X-GreyNoise-Generated-At": "2026-10-29T10:00:00Z"}
-        client._file_session.get = Mock(return_value=_file_response(304, headers=headers))
-        output = tmp_path / "feed.csv"
-
-        result = download(client, str(output), etag='"abc"')
-
-        assert result == FileResult(status="not_modified", etag='"abc"', generated_at="2026-10-29T10:00:00Z")
-        assert not output.exists()
+        assert "X-GreyNoise-Integration" not in client._file_session.get.call_args[1]["headers"]
 
     @pytest.mark.parametrize("header, expected", [(None, None), ("false", False), ("true", True)])
     def test_truncated_reported_only_when_sent(self, client, download, url, params, header, expected):
         headers = {} if header is None else {"X-GreyNoise-Truncated": header}
-        client._file_session.get = Mock(return_value=_file_response(304, headers=headers))
+        client._file_session.get = Mock(return_value=_file_response(200, headers=headers))
 
-        result = download(client, io.BytesIO(), etag='"abc"')
+        result = download(client, io.BytesIO())
 
         assert result.truncated is expected
-
-    def test_not_modified_without_etag_header_keeps_sent_etag(self, client, tmp_path, download, url, params):
-        client._file_session.get = Mock(return_value=_file_response(304))
-
-        result = download(client, str(tmp_path / "feed.csv"), etag='"abc"')
-
-        assert result.etag == '"abc"'
 
     def test_provisioning(self, client, tmp_path, download, url, params):
         body = json.dumps({"status": "provisioning"}).encode()
@@ -1301,11 +1279,9 @@ class TestCallbackFileMetadata:
             "generated_at": "2026-10-29T10:00:00Z",
             "size_bytes": 1024,
             "row_count": 12,
-            "etag": '"abc"',
         }
         headers = {
             "Content-Type": "application/json",
-            "ETag": '"abc"',
             "X-GreyNoise-Generated-At": "2026-10-29T10:00:00Z",
             "X-GreyNoise-Row-Count": "12",
         }
@@ -1313,12 +1289,11 @@ class TestCallbackFileMetadata:
 
         result = client.callback_file_metadata(days=3, integration="crowdstrike-ngsiem/3.1.0")
 
-        assert result == FileResult(status="ok", etag='"abc"', generated_at="2026-10-29T10:00:00Z", row_count=12)
+        assert result == FileResult(status="ok", generated_at="2026-10-29T10:00:00Z", row_count=12)
         args, kwargs = client._file_session.get.call_args
         assert args == ("https://api.greynoise.io/v3/files/callback/metadata",)
         assert kwargs["params"] == {"days": 3, "format": "csv", "profile": "ngsiem"}
         assert kwargs["headers"]["X-GreyNoise-Integration"] == "crowdstrike-ngsiem/3.1.0"
-        assert "If-None-Match" not in kwargs["headers"]
 
     def test_building(self, client):
         headers = {"Content-Type": "application/json", "Retry-After": "30"}
@@ -1352,14 +1327,12 @@ class TestGNQLFileMetadata:
             "status": "enabled",
             "query": "last_seen:1d",
             "generated_at": "2026-10-29T10:00:00Z",
-            "etag": '"abc"',
             "row_count": 500,
             "total_count": 900,
             "truncated": True,
         }
         headers = {
             "Content-Type": "application/json",
-            "ETag": '"abc"',
             "X-GreyNoise-Generated-At": "2026-10-29T10:00:00Z",
             "X-GreyNoise-Row-Count": "500",
             "X-GreyNoise-Total-Count": "900",
@@ -1372,7 +1345,6 @@ class TestGNQLFileMetadata:
 
         assert result == FileResult(
             status="ok",
-            etag='"abc"',
             generated_at="2026-10-29T10:00:00Z",
             row_count=500,
             total_count=900,
@@ -1383,7 +1355,6 @@ class TestGNQLFileMetadata:
         assert args == ("https://api.greynoise.io/v3/files/gnql/metadata",)
         assert kwargs["params"] == {"query": "last_seen:1d", "format": "csv", "profile": "ngsiem", "limit": 500}
         assert kwargs["headers"]["X-GreyNoise-Integration"] == "crowdstrike-ngsiem/3.1.0"
-        assert "If-None-Match" not in kwargs["headers"]
 
     def test_provisioning(self, client):
         headers = {"Content-Type": "application/json", "Retry-After": "60", "X-GreyNoise-Feed-Status": "provisioning"}
@@ -1413,7 +1384,7 @@ class TestFileParams:
     """File download request parameters."""
 
     def test_limit(self, client):
-        client._file_session.get = Mock(return_value=_file_response(304))
+        client._file_session.get = Mock(return_value=_file_response(202))
 
         client.gnql_file("last_seen:1d", io.BytesIO(), limit=500)
 
@@ -1421,7 +1392,7 @@ class TestFileParams:
 
     def test_proxy(self, client):
         client.config.proxy = "http://proxy:3128"
-        client._file_session.get = Mock(return_value=_file_response(304))
+        client._file_session.get = Mock(return_value=_file_response(202))
 
         client.callback_file(io.BytesIO(), days=3)
 
@@ -1430,7 +1401,7 @@ class TestFileParams:
         assert kwargs["params"]["days"] == 3
 
     def test_timeout(self, client):
-        client._file_session.get = Mock(return_value=_file_response(304))
+        client._file_session.get = Mock(return_value=_file_response(202))
 
         client.gnql_file("last_seen:1d", io.BytesIO())
         assert client._file_session.get.call_args[1]["timeout"] == 120
@@ -1449,7 +1420,6 @@ class _FileServer(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("ETag", '"abc"')
             self.end_headers()
             self.wfile.write(body)
         elif self.path.startswith("/v3/files/callback") and "days=1" in self.path:

@@ -64,21 +64,17 @@ class APIConfig:
 class FileResult:
     """Outcome of a pre-built file download (:meth:`GreyNoise.callback_file`, :meth:`GreyNoise.gnql_file`).
 
-    ``status`` is ``ok`` when the file was written, ``not_modified`` when the
-    ``etag`` passed in is still current, and ``provisioning`` when the server is
-    still building the file and the caller should retry after ``retry_after``
-    seconds. Nothing is written unless ``status`` is ``ok``. ``feed_status`` is
-    the GNQL subscription's build status. A field the server did not report is
-    ``None``: callback files report no ``truncated``, and a GNQL ``not_modified``
-    response reports neither ``row_count`` nor ``truncated``.
+    ``status`` is ``ok`` when the file was written, and ``provisioning`` when the
+    server is still building the file and the caller should retry after
+    ``retry_after`` seconds. Nothing is written unless ``status`` is ``ok``.
+    ``feed_status`` is the GNQL subscription's build status. A field the server
+    did not report is ``None``; callback files report no ``truncated``.
     """
 
     STATUS_OK = "ok"
-    STATUS_NOT_MODIFIED = "not_modified"
     STATUS_PROVISIONING = "provisioning"
 
     status: str
-    etag: Optional[str] = None
     generated_at: Optional[str] = None
     row_count: Optional[int] = None
     total_count: Optional[int] = None
@@ -1707,7 +1703,6 @@ class GreyNoise(BaseAPIClient):
         days: int = 7,
         file_format: str = "csv",
         profile: str = "ngsiem",
-        etag: Optional[str] = None,
         integration: Optional[str] = None,
         timeout: Union[float, Tuple[float, float], None] = None,
     ) -> FileResult:
@@ -1722,7 +1717,6 @@ class GreyNoise(BaseAPIClient):
         :param days: Lookback window in days, 1 to 7.
         :param file_format: File format; the API supports ``csv``.
         :param profile: Column layout; the API supports ``ngsiem``.
-        :param etag: ETag of the last downloaded file, sent as ``If-None-Match``.
         :param integration: Integration name and version, e.g. ``crowdstrike-ngsiem/3.1.0``,
             sent as ``X-GreyNoise-Integration``.
         :param timeout: Request timeout in seconds, or a ``(connect, read)`` tuple
@@ -1731,7 +1725,7 @@ class GreyNoise(BaseAPIClient):
         :raises RequestFailure: On any other error response or connection failure.
         """
         params = {"days": days, "format": file_format, "profile": profile}
-        return self._files_request(self.EP_FILES_CALLBACK, params, output, etag, integration, timeout)
+        return self._files_request(self.EP_FILES_CALLBACK, params, output, integration, timeout)
 
     def callback_file_metadata(
         self,
@@ -1746,13 +1740,13 @@ class GreyNoise(BaseAPIClient):
         (``GET /v3/files/callback/metadata``).
 
         Takes the same parameters as :meth:`callback_file` and returns ``status``
-        ``ok`` or ``provisioning``, with ``etag``, ``generated_at`` and ``row_count``.
+        ``ok`` or ``provisioning``, with ``generated_at`` and ``row_count``.
 
         :raises RateLimitError: On HTTP 429.
         :raises RequestFailure: On any other error response or connection failure.
         """
         params = {"days": days, "format": file_format, "profile": profile}
-        return self._files_request(self.EP_FILES_CALLBACK_METADATA, params, None, None, integration, timeout)
+        return self._files_request(self.EP_FILES_CALLBACK_METADATA, params, None, integration, timeout)
 
     def gnql_file(
         self,
@@ -1762,7 +1756,6 @@ class GreyNoise(BaseAPIClient):
         limit: Optional[int] = None,
         file_format: str = "csv",
         profile: str = "ngsiem",
-        etag: Optional[str] = None,
         integration: Optional[str] = None,
         timeout: Union[float, Tuple[float, float], None] = None,
     ) -> FileResult:
@@ -1779,7 +1772,6 @@ class GreyNoise(BaseAPIClient):
         :param limit: Maximum number of rows to serve.
         :param file_format: File format; the API supports ``csv``.
         :param profile: Column layout; the API supports ``ngsiem``.
-        :param etag: ETag of the last downloaded file, sent as ``If-None-Match``.
         :param integration: Integration name and version, sent as ``X-GreyNoise-Integration``.
         :param timeout: Request timeout in seconds, or a ``(connect, read)`` tuple
             (default: the client's ``timeout``).
@@ -1787,7 +1779,7 @@ class GreyNoise(BaseAPIClient):
         :raises RequestFailure: On any other error response or connection failure.
         """
         params = _gnql_file_params(query, limit, file_format, profile)
-        return self._files_request(self.EP_FILES_GNQL, params, output, etag, integration, timeout)
+        return self._files_request(self.EP_FILES_GNQL, params, output, integration, timeout)
 
     def gnql_file_metadata(
         self,
@@ -1811,12 +1803,10 @@ class GreyNoise(BaseAPIClient):
         :raises RequestFailure: On any other error response or connection failure.
         """
         params = _gnql_file_params(query, limit, file_format, profile)
-        return self._files_request(self.EP_FILES_GNQL_METADATA, params, None, None, integration, timeout)
+        return self._files_request(self.EP_FILES_GNQL_METADATA, params, None, integration, timeout)
 
-    def _files_request(self, endpoint, params, output, etag, integration, timeout) -> FileResult:
+    def _files_request(self, endpoint, params, output, integration, timeout) -> FileResult:
         headers = self._default_headers()
-        if etag:
-            headers["If-None-Match"] = etag
         if integration:
             headers["X-GreyNoise-Integration"] = integration
         proxies = {protocol: self.config.proxy for protocol in ("http", "https")} if self.config.proxy else None
@@ -1831,7 +1821,7 @@ class GreyNoise(BaseAPIClient):
                 proxies=proxies,
                 stream=True,
             ) as response:
-                result = _file_result(response, etag)
+                result = _file_result(response)
                 if result.status == FileResult.STATUS_OK and output is not None:
                     _write_stream(response.iter_content(self.FILE_CHUNK_SIZE), output)
                 return result
@@ -1840,13 +1830,11 @@ class GreyNoise(BaseAPIClient):
             raise RequestFailure(0, str(e))
 
 
-def _file_result(response: requests.Response, etag: Optional[str]) -> FileResult:
+def _file_result(response: requests.Response) -> FileResult:
     """Map a file response to a :class:`FileResult`, raising on error statuses."""
     status_code = response.status_code
     if status_code == 200:
         status = FileResult.STATUS_OK
-    elif status_code == 304:
-        status = FileResult.STATUS_NOT_MODIFIED
     elif status_code == 202:
         status = FileResult.STATUS_PROVISIONING
     else:
@@ -1864,7 +1852,6 @@ def _file_result(response: requests.Response, etag: Optional[str]) -> FileResult
     headers = response.headers
     return FileResult(
         status=status,
-        etag=headers.get("ETag") or (etag if status == FileResult.STATUS_NOT_MODIFIED else None),
         generated_at=headers.get("X-GreyNoise-Generated-At"),
         row_count=_header_int(headers.get("X-GreyNoise-Row-Count")),
         total_count=_header_int(headers.get("X-GreyNoise-Total-Count")),
